@@ -1,0 +1,230 @@
+#!/bin/bash
+# Symmetric run on SuperMIC.
+# Written by Shaohao Chen in Sep 2014.
+# Copywright belongs to HPC@LSU.
+
+function run_sym {
+
+# ###### excutable files ######
+if [ -n "$MY_EXE_CPU" ]; then
+  export EXE_CPU=$MY_EXE_CPU
+else
+  echo "Please specify the CPU binary following -c."
+  exit
+fi
+if [ -n "$MY_EXE_MIC" ]; then
+  export EXE_MIC=$MY_EXE_MIC
+else
+  echo "Please specify the MIC binary following -m."
+  exit
+fi
+
+# ###### input file ######
+if [ -n "$MY_INP_PAR" ]; then
+  export INP_PAR=$MY_INP_PAR
+else
+  export INP_PAR=""
+fi
+
+# ###### Num of TASKs and THREADs (default for pure MPI or gerneral for hybid jobs) ######
+if [ -n "$TASKS_PER_HOST" ]; then
+   export CPU_TASKS=$TASKS_PER_HOST
+else
+   export CPU_TASKS=20    # maximum 20 cores
+fi
+
+if [ -n "$TASKS_PER_MIC" ]; then
+   export MIC_TASKS=$TASKS_PER_MIC
+else
+   export MIC_TASKS=30  # maximum 61, but not use too many for large jobs due to 16G memory limit
+fi
+
+if [ -n "$THREADS_HOST" ]; then
+   export CPU_THREADS=$THREADS_HOST
+else
+   export CPU_THREADS=1   # for pure MPI
+fi
+
+if [ -n "$THREADS_MIC" ]; then
+   export MIC_THREADS=$THREADS_MIC
+else
+   export MIC_THREADS=1   # for pure MPI
+fi
+
+# ###### PBS environments ######
+if [ -n "$PBS_NODEFILE" ]; then
+  export NODEFILE=$PBS_NODEFILE
+else
+  export NODEFILE="nodefile"
+fi
+
+if [ -n "$PBS_NUM_NODES" ]; then
+  export NUM_NODES=$PBS_NUM_NODES
+elif [ -n "NUM_OF_NODES" ]; then
+  export NUM_NODES=$NUM_OF_NODES
+else
+  export NUM_NODES=1
+fi
+
+if [ -n "$PBS_JOBID" ]; then
+  export JOBID=$PBS_JOBID
+else
+  echo "###### You are not in PBS queue. ######"
+fi
+
+echo "###### number of nodes ######"
+echo "$NUM_NODES"
+echo "###### number of MPI tasks per host ######"
+echo "$CPU_TASKS"
+echo "###### number of MPI tasks per MIC ######"
+echo "$MIC_TASKS"
+echo "###### number of OpenMP threads spawned by each task on the host ######"
+echo "$CPU_THREADS"
+echo "###### number of OpenMP threads spawned by each task on the MIC ######"
+echo "$MIC_THREADS"
+echo "        "
+
+# ==== set MPI environments ===
+#export I_MPI_MIC=1
+##export I_MPI_FABRICS=shm:tcp
+#export I_MPI_FABRICS=shm:dapl
+#export I_MPI_DAPL_PROVIDER="ofa-v2-mlx4_0-1u"
+#export I_MPI_OFA_ADAPTER_NAME=mlx4_0
+echo "###### MPI fabrics type ######"
+echo "I_MPI_FABRICS=$I_MPI_FABRICS"
+echo "        "
+
+# ==== set run-time options ===
+export CPU_ENV="-env OMP_NUM_THREADS $CPU_THREADS"
+export MIC_ENV="-env OMP_NUM_THREADS $MIC_THREADS -env LD_LIBRARY_PATH $MIC_LD_LIBRARY_PATH"
+
+# === create job temp files ===
+export TEMP_PATH="$HOME/.log/joboutput"
+if [ ! -d $TEMP_PATH ]; then
+   mkdir -p $TEMP_PATH
+fi
+
+export MY_NODEFILE=$TEMP_PATH/nodefile.$JOBID
+if [ -a $MY_NODEFILE ]; then
+   rm $MY_NODEFILE
+fi
+cat $NODEFILE|uniq>$MY_NODEFILE
+
+export TEMP_CMD_FILE=$TEMP_PATH/temp.cmd.$JOBID
+if [ -a $TEMP_CMD_FILE ]; then
+   rm $TEMP_CMD_FILE   # delete if exits, not appended from previous run
+fi
+
+# === set commands for running jobs ===
+for (( i=1 ; i <= $NUM_NODES ; i++ )); do
+  node_name=`sed -n ${i}p $MY_NODEFILE`
+  cpu_cmd="-n $CPU_TASKS -host $node_name $CPU_ENV $EXE_CPU"
+  mic0_cmd="-n $MIC_TASKS -host ${node_name}p-mic0 $MIC_ENV $EXE_MIC"
+  mic1_cmd="-n $MIC_TASKS -host ${node_name}p-mic1 $MIC_ENV $EXE_MIC"
+  echo -n "$cpu_cmd : $mic0_cmd : $mic1_cmd : " >> $TEMP_CMD_FILE
+done
+
+#echo "###### temporary command file ######"
+#echo "$TEMP_CMD_FILE"
+
+sed -i '$s/: $//' $TEMP_CMD_FILE
+#export all_cmd=`sed -n 1p $TEMP_CMD_FILE`
+export all_cmd="mpiexec.hydra $(head -n 1 $TEMP_CMD_FILE)"
+echo "###### executing command ######"
+echo "$all_cmd"
+echo "        "
+echo "###### users' output ######"
+#rm $TEMP_CMD_FILE
+
+# ###### run jobs ######
+if [ -n "$INP_PAR" ]; then
+  $all_cmd $INP_PAR
+else
+  $all_cmd
+fi
+
+}  # end function run_sym
+
+
+# === output user guide ===
+echo "######################################################################"
+echo "---------------------  User Guide -----------------------"
+echo "The micrun.sym is a bash script for users to run MPI jobs"
+echo "symmetrically on both CPUs and Xeon Phis of SuperMIC."
+echo "        "
+echo "Currently MIC-related MPI jobs can be built only by intel MPI"
+echo "compiler on SuperMIC. Users need to switch to or load intel MPI"
+echo "in the module before compiling and running symmetric codes."
+echo "module switch mvapich2/2.0/INTEL-14.0.2 impi/4.1.3.048"
+echo "or"
+echo "module load impi/4.1.3.048"
+echo "        "
+echo "Then create the CPU binary and the MIC binary separately:"
+echo "mpiicc       name.c -o name.cpu"
+echo "mpiicc -mmic name.c -o name.mic"
+echo "or"
+echo "mpiifort       name.f90 -o name.cpu"
+echo "mpiifort -mmic name.f90 -o name.mic"
+echo "Add the flag -openmp for MPI-OpenMP hybrid codes."
+echo "        "
+echo "Users need to set the following environments before running jobs:"
+echo "export TASKS_PER_HOST=20 # number of MPI tasks per host"
+echo "export THREADS_HOST=1    # number of OpenMP threads spawned by each task on the host"
+echo "export TASKS_PER_MIC=30  # number of MPI tasks per MIC"
+echo "export THREADS_MIC=1     # number of OpenMP threads spawned by each task on the MIC"
+echo "Set THREADS_HOST=1 and THREADS_MIC=1 for pure MPI jobs."
+echo "        "
+echo "Finally run the jobs with the following command line:"
+echo "micrun.sym -c /path/to/name.cpu -m /path/to/name.mic -inp \"par1 par2 ...\" "
+echo "######################################################################"
+echo "        "
+echo "-------------------- start the symmetric job ------------------"
+echo "        "
+
+# ###### specify name of binary with input parameters ###### 
+MY_EXE_CPU=""
+MY_EXE_MIC=""
+MY_INP_PAR=""
+#for $arg in "$@"
+stop_parsing=0
+while [ $stop_parsing -ne 1 ]
+do
+  #case "$arg" in
+  case "$1" in
+    -c)
+      echo "###### CPU binary ######"
+      shift
+      MY_EXE_CPU=$1
+      shift
+      echo "$MY_EXE_CPU"
+      ;;
+    -m)
+      echo "###### MIC binary ######"
+      shift
+      MY_EXE_MIC=$1
+      shift
+      echo "$MY_EXE_MIC"
+      ;;
+    -inp)
+      echo "###### users' input paramters ######"
+      shift
+      MY_INP_PAR=$1
+      shift
+      echo "$MY_INP_PAR"
+      ;;
+    *)
+      echo "        "
+      stop_parsing=1
+      ;;
+  esac
+done
+
+# === check mpi version ===
+#module switch mvapich2/2.0/INTEL-14.0.2 impi/4.1.3.048/intel64
+echo "###### version of mpiexec.hydra ######"
+echo `which mpiexec.hydra`
+echo "        "
+
+# ###### run the function run_sym ######
+run_sym
+
